@@ -15,7 +15,7 @@ export default async function handler(req, res) {
       'Authorization': `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: 'glm-4.5-air',
+      model: 'glm-5.3-flash',
       messages: req.body.messages,
       stream: true,
       max_tokens: 2048,
