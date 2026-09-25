@@ -1136,5 +1136,414 @@
     <button class="ai-send" id="aiSend">➤</button>
   </div>
 </div>
+	<script>
+(function(){
+  'use strict';
+
+  /* ============================================================
+     配置区
+     ============================================================ */
+  var CONFIG = {
+    API_URL: '/api/chat',
+    SYSTEM_PROMPT: '你是"小锡"，江苏省锡东高级中学的AI助手。请用简洁、友好的中文回答用户的问题。',
+    MAX_HISTORY: 20
+  };
+
+  var state = {
+    isOpen: false,
+    isGenerating: false,
+    isFullscreen: false,
+    messages: [],
+    abortController: null
+  };
+
+  var floatBtn = document.getElementById('aiFloatBtn');
+  var panel = document.getElementById('aiPanel');
+  var closeBtn = document.getElementById('aiClose');
+  var fullBtn = document.getElementById('aiFullscreen');
+  var body = document.getElementById('aiBody');
+  var input = document.getElementById('aiInput');
+  var sendBtn = document.getElementById('aiSend');
+  var chips = document.getElementById('aiChips');
+
+  /* ============================================================
+     工具
+     ============================================================ */
+  function scrollToBottom(){
+    body.scrollTop = body.scrollHeight;
+  }
+
+  function appendMessage(role, content){
+    var msg = document.createElement('div');
+    msg.className = 'ai-msg ' + role;
+    var bubble = document.createElement('div');
+    bubble.className = 'ai-bubble';
+    bubble.textContent = content;
+    msg.appendChild(bubble);
+    body.appendChild(msg);
+    scrollToBottom();
+    return bubble;
+  }
+
+  function appendLoading(){
+    var msg = document.createElement('div');
+    msg.className = 'ai-msg ai';
+    msg.id = 'aiLoading';
+    var bubble = document.createElement('div');
+    bubble.className = 'ai-bubble ai-loading';
+    bubble.innerHTML = '<span></span><span></span><span></span>';
+    msg.appendChild(bubble);
+    body.appendChild(msg);
+    scrollToBottom();
+  }
+
+  function removeLoading(){
+    var el = document.getElementById('aiLoading');
+    if (el) el.remove();
+  }
+
+  /* ============================================================
+     拖拽（pointer events，兼容鼠标 + 触摸）
+     ============================================================ */
+  (function initDrag(){
+    var isDragging = false;
+    var hasMoved = false;
+    var startX = 0, startY = 0;
+    var startLeft = 0, startTop = 0;
+    var DRAG_THRESHOLD = 5;   // 移动超过 5px 才算拖拽
+
+    // 把 right/bottom 定位转成 left/top，方便拖拽
+    function preparePosition(){
+      var rect = floatBtn.getBoundingClientRect();
+      floatBtn.style.left = rect.left + 'px';
+      floatBtn.style.top = rect.top + 'px';
+      floatBtn.style.right = 'auto';
+      floatBtn.style.bottom = 'auto';
+      startLeft = rect.left;
+      startTop = rect.top;
+    }
+
+    // 松手后吸附到最近的左右边
+    function snapToEdge(){
+      var rect = floatBtn.getBoundingClientRect();
+      var winW = window.innerWidth;
+      var winH = window.innerHeight;
+      var padding = 12;
+
+      // 左右吸附
+      var centerX = rect.left + rect.width / 2;
+      var targetLeft = centerX < winW / 2
+        ? padding
+        : winW - rect.width - padding;
+
+      // 上下限制
+      var targetTop = Math.max(padding, Math.min(rect.top, winH - rect.height - padding));
+
+      floatBtn.style.transition = 'left .35s cubic-bezier(.34,1.56,.64,1), top .35s cubic-bezier(.34,1.56,.64,1)';
+      floatBtn.style.left = targetLeft + 'px';
+      floatBtn.style.top = targetTop + 'px';
+
+      // 同步面板位置
+      updatePanelPosition();
+
+      setTimeout(function(){
+        floatBtn.style.transition = '';
+      }, 360);
+    }
+
+    // 根据悬浮球位置更新面板位置
+    function updatePanelPosition(){
+      if (!state.isOpen || state.isFullscreen) return;
+      var rect = floatBtn.getBoundingClientRect();
+      var winW = window.innerWidth;
+      var winH = window.innerHeight;
+      var panelW = panel.offsetWidth;
+      var panelH = panel.offsetHeight;
+      var gap = 12;
+
+      // 水平：球在左半屏 → 面板靠左；右半屏 → 面板靠右
+      var centerX = rect.left + rect.width / 2;
+      if (centerX < winW / 2){
+        panel.style.left = Math.max(gap, rect.left) + 'px';
+        panel.style.right = 'auto';
+      } else {
+        panel.style.right = Math.max(gap, winW - rect.right) + 'px';
+        panel.style.left = 'auto';
+      }
+
+      // 垂直：球在上半屏 → 面板在球下方；下半屏 → 面板在球上方
+      var centerY = rect.top + rect.height / 2;
+      if (centerY < winH / 2){
+        panel.style.top = (rect.bottom + gap) + 'px';
+        panel.style.bottom = 'auto';
+      } else {
+        panel.style.bottom = Math.max(gap, winH - rect.top + gap) + 'px';
+        panel.style.top = 'auto';
+      }
+    }
+
+    floatBtn.addEventListener('pointerdown', function(e){
+      if (e.button !== undefined && e.button !== 0) return;
+      isDragging = true;
+      hasMoved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+
+      preparePosition();
+
+      floatBtn.classList.add('dragging');
+      floatBtn.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+
+    floatBtn.addEventListener('pointermove', function(e){
+      if (!isDragging) return;
+      var dx = e.clientX - startX;
+      var dy = e.clientY - startY;
+
+      if (!hasMoved && Math.abs(dx) + Math.abs(dy) > DRAG_THRESHOLD){
+        hasMoved = true;
+      }
+      if (!hasMoved) return;
+
+      var newLeft = startLeft + dx;
+      var newTop = startTop + dy;
+
+      // 边界限制
+      var winW = window.innerWidth;
+      var winH = window.innerHeight;
+      var w = floatBtn.offsetWidth;
+      var h = floatBtn.offsetHeight;
+      newLeft = Math.max(0, Math.min(newLeft, winW - w));
+      newTop = Math.max(0, Math.min(newTop, winH - h));
+
+      floatBtn.style.left = newLeft + 'px';
+      floatBtn.style.top = newTop + 'px';
+
+      // 拖拽过程中同步面板
+      if (state.isOpen) updatePanelPosition();
+    });
+
+    floatBtn.addEventListener('pointerup', function(e){
+      if (!isDragging) return;
+      isDragging = false;
+      floatBtn.classList.remove('dragging');
+      try{ floatBtn.releasePointerCapture(e.pointerId); }catch(err){}
+
+      if (hasMoved){
+        snapToEdge();
+      } else {
+        // 没移动 = 点击
+        openPanel();
+      }
+    });
+
+    floatBtn.addEventListener('pointercancel', function(e){
+      if (!isDragging) return;
+      isDragging = false;
+      floatBtn.classList.remove('dragging');
+      snapToEdge();
+    });
+
+    // 窗口 resize 时重新吸附
+    window.addEventListener('resize', function(){
+      if (floatBtn.style.left){
+        snapToEdge();
+      }
+    });
+  })();
+
+  /* ============================================================
+     面板开合 + 全屏
+     ============================================================ */
+  function openPanel(){
+    if (state.isOpen) return;
+    state.isOpen = true;
+    panel.style.display = 'flex';
+    panel.classList.remove('closing');
+    void panel.offsetWidth;
+    panel.style.animation = 'aiPanelIn .42s cubic-bezier(.34,1.56,.64,1)';
+    updatePanelPositionSafe();
+    input.focus();
+    scrollToBottom();
+  }
+
+  function closePanel(){
+    if (!state.isOpen) return;
+    state.isOpen = false;
+    panel.classList.add('closing');
+    if (state.abortController){
+      state.abortController.abort();
+      state.abortController = null;
+    }
+    state.isGenerating = false;
+    sendBtn.disabled = false;
+    removeLoading();
+    setTimeout(function(){
+      panel.style.display = 'none';
+      panel.classList.remove('closing');
+    }, 260);
+  }
+
+  function updatePanelPositionSafe(){
+    // 复用拖拽模块的位置逻辑
+    var rect = floatBtn.getBoundingClientRect();
+    var winW = window.innerWidth;
+    var winH = window.innerHeight;
+    var gap = 12;
+
+    if (state.isFullscreen){
+      panel.style.left = '2vh';
+      panel.style.right = '2vh';
+      panel.style.top = '2vh';
+      panel.style.bottom = '2vh';
+      return;
+    }
+
+    var centerX = rect.left + rect.width / 2;
+    if (centerX < winW / 2){
+      panel.style.left = Math.max(gap, rect.left) + 'px';
+      panel.style.right = 'auto';
+    } else {
+      panel.style.right = Math.max(gap, winW - rect.right) + 'px';
+      panel.style.left = 'auto';
+    }
+
+    var centerY = rect.top + rect.height / 2;
+    if (centerY < winH / 2){
+      panel.style.top = (rect.bottom + gap) + 'px';
+      panel.style.bottom = 'auto';
+    } else {
+      panel.style.bottom = Math.max(gap, winH - rect.top + gap) + 'px';
+      panel.style.top = 'auto';
+    }
+  }
+
+  function toggleFullscreen(){
+    state.isFullscreen = !state.isFullscreen;
+    if (state.isFullscreen){
+      panel.classList.add('fullscreen');
+      fullBtn.textContent = '⛶';
+      fullBtn.title = '退出全屏';
+    } else {
+      panel.classList.remove('fullscreen');
+      fullBtn.textContent = '⛶';
+      fullBtn.title = '全屏';
+      updatePanelPositionSafe();
+    }
+  }
+
+  closeBtn.addEventListener('click', closePanel);
+  fullBtn.addEventListener('click', toggleFullscreen);
+
+  /* ============================================================
+     发送消息（流式）
+     ============================================================ */
+  async function sendMessage(text){
+    if (!text.trim() || state.isGenerating) return;
+
+    appendMessage('user', text);
+    state.messages.push({ role: 'user', content: text });
+
+    if (state.messages.length > CONFIG.MAX_HISTORY * 2){
+      state.messages = state.messages.slice(-CONFIG.MAX_HISTORY * 2);
+    }
+
+    input.value = '';
+    input.style.height = 'auto';
+    state.isGenerating = true;
+    sendBtn.disabled = true;
+    appendLoading();
+
+    state.abortController = new AbortController();
+
+    try{
+      var response = await fetch(CONFIG.API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'system', content: CONFIG.SYSTEM_PROMPT }
+          ].concat(state.messages)
+        }),
+        signal: state.abortController.signal
+      });
+
+      if (!response.ok){
+        throw new Error('请求失败 (' + response.status + ')');
+      }
+
+      removeLoading();
+      var bubble = appendMessage('ai', '');
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder('utf-8');
+      var buffer = '';
+      var fullContent = '';
+
+      while (true){
+        var chunk = await reader.read();
+        if (chunk.done) break;
+
+        buffer += decoder.decode(chunk.value, { stream: true });
+        var lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (var i = 0; i < lines.length; i++){
+          var trimmed = lines[i].trim();
+          if (!trimmed || trimmed.indexOf('data:') !== 0) continue;
+          var dataStr = trimmed.slice(5).trim();
+          if (dataStr === '[DONE]') continue;
+
+          try{
+            var json = JSON.parse(dataStr);
+            var delta = json.choices && json.choices[0] && json.choices[0].delta;
+            if (delta && delta.content){
+              fullContent += delta.content;
+              bubble.textContent = fullContent;
+              scrollToBottom();
+            }
+          }catch(e){}
+        }
+      }
+
+      state.messages.push({ role: 'assistant', content: fullContent });
+
+    }catch(err){
+      removeLoading();
+      if (err.name !== 'AbortError'){
+        appendMessage('ai', '抱歉，请求出错了：' + err.message);
+      }
+    }finally{
+      state.isGenerating = false;
+      sendBtn.disabled = false;
+      state.abortController = null;
+      input.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', function(){
+    sendMessage(input.value);
+  });
+
+  input.addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && !e.shiftKey){
+      e.preventDefault();
+      sendMessage(input.value);
+    }
+  });
+
+  input.addEventListener('input', function(){
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+  });
+
+  chips.addEventListener('click', function(e){
+    if (e.target.classList.contains('ai-chip')){
+      sendMessage(e.target.textContent);
+    }
+  });
+
+})();
+	</script>
 </body>
 </html>
